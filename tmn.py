@@ -187,10 +187,31 @@ def extract_links(text):
     return out[:5]
 
 
+def _rl_retry(fn):
+    """Create pe rate_limit aaye to khud wait karke retry (3 tries).
+    Shared/carrier IPs pe server cooldown aam hai — user ko lagta tha
+    'domain nahi chal raha'; ab tool khud ruk ke bana dega."""
+    r = None
+    for attempt in range(3):
+        r = fn()
+        if isinstance(r, dict) and \
+                r.get("error") == "rate_limit_create_email_warning" and attempt < 2:
+            time.sleep(25)
+            continue
+        break
+    return r
+
+
+def fetch_all_domains():
+    def f(s):
+        return {"quick": s.c.domains(11), "shadow": s.c.domains(1)}
+    return with_session(f)
+
+
 # ---------------- actions ----------------
 def do_new():
     with Spinner("Creating .lat mail"):
-        r = with_session(lambda s: s.c.generate())
+        r = with_session(lambda s: _rl_retry(lambda: s.c.generate()))
     if isinstance(r, dict) and r.get("emailData"):
         em = r["emailData"]["emailAddress"]
         cprint(G, "\n✅ MAIL READY 😈🔥")
@@ -200,23 +221,44 @@ def do_new():
         cprint(R, "⚠️", err_text(r) if not isinstance(r, Exception) else str(r))
 
 
-def do_custom(alias):
+def do_custom(alias, interactive=False):
     alias = re.sub(r"[^a-z0-9._-]", "", (alias or "").lower())[:30]
     if len(alias) < 3:
         cprint(R, "❌ Alias must be at least 3 characters. Example: rahul123")
         return
 
+    domain, etype, exp_label = None, 1, "24 hours"
+    if interactive:
+        with Spinner("Loading domains..."):
+            all_d = fetch_all_domains()
+        opts = [(d, 1, "24 hours", ".lat Quick") for d in (all_d or {}).get("quick", [])]
+        opts += [(d, 2, "30 days", "Shadow") for d in (all_d or {}).get("shadow", [])]
+        if not opts:
+            cprint(R, "⚠️ Domain list nahi aayi — server slow hai, retry karo.")
+            return
+        print(f"\n{C}🌐 Domain choose karo:{X}")
+        for i, (d, _t, _e, tag) in enumerate(opts, 1):
+            print(f"  {B}{i}{X}. {d}  {DIM}({tag}){X}")
+        try:
+            pick = input(f"{Y}Domain number (Enter = pehla .lat): {X}").strip()
+        except (EOFError, KeyboardInterrupt):
+            pick = ""
+        if pick.isdigit() and 1 <= int(pick) <= len(opts):
+            domain, etype, exp_label, _tag = opts[int(pick) - 1]
+        else:
+            domain, etype, exp_label = opts[0][0], opts[0][1], opts[0][2]
+
     def f(s):
-        doms = s.c.domains(11)
-        if not doms:
+        dom = domain or (s.c.domains(11) or [None])[0]
+        if not dom:
             return {"error": "no_domain"}
-        return s.c.create_custom(alias, doms[0], 1)
-    with Spinner(f"Creating {alias}@..."):
+        return _rl_retry(lambda: s.c.create_custom(alias, dom, etype))
+    with Spinner(f"Creating {alias}@{domain or '...'}"):
         r = with_session(f)
     if isinstance(r, dict) and r.get("emailData"):
         cprint(G, "\n✅ CUSTOM MAIL READY 😈")
         print(f"📧 {B}{r['emailData']['emailAddress']}{X}")
-        cprint(DIM, "⏳ Expiry: 24 hours")
+        cprint(DIM, f"⏳ Expiry: {exp_label}")
     else:
         cprint(R, "⚠️", err_text(r) if not isinstance(r, Exception) else str(r))
         cprint(DIM, "(If the alias is taken, try another name)")
@@ -230,7 +272,8 @@ def do_shadow():
         a = s.c.emit("generate_email_alias", timeout=30) or {}
         alias = re.sub(r"[^a-z0-9._-]", "",
                        (a.get("alias") or f"user{int(time.time()) % 100000}").lower())
-        return s.c.create_custom(alias, doms[0], 2)
+        import random
+        return _rl_retry(lambda: s.c.create_custom(alias, random.choice(doms), 2))
     with Spinner("Creating Shadow mail"):
         r = with_session(f)
     if isinstance(r, dict) and r.get("emailData"):
@@ -239,6 +282,21 @@ def do_shadow():
         cprint(DIM, "⏳ Expiry: 30 days — .org/.com accepted by more big sites ✅")
     else:
         cprint(R, "⚠️", err_text(r) if not isinstance(r, Exception) else str(r))
+
+
+def do_domains():
+    with Spinner("Loading domains..."):
+        all_d = fetch_all_domains()
+    q = (all_d or {}).get("quick", [])
+    sh = (all_d or {}).get("shadow", [])
+    print(f"\n{C}🌐 AVAILABLE DOMAINS{X}")
+    print(f"{B}⚡ Quick (.lat — 24 hours):{X}")
+    for d in q:
+        print(f"   • {d}")
+    print(f"{B}👻 Shadow (.org/.com — 30 days):{X}")
+    for d in sh:
+        print(f"   • {d}")
+    cprint(DIM, "Custom mail (option 2) me inme se koi bhi domain choose kar sakte ho.")
 
 
 _last_msgs = []
@@ -399,7 +457,8 @@ def banner():
  ███╔╝    ╚██╔╝  ██╔══██╗██║   ██║ ██╔██╗
 ███████╗   ██║   ██║  ██║╚██████╔╝██╔╝ ██╗
 ╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝{X}
-{C}        📧 TEMPMAIL NINJA — CLI (Termux){X}""")
+{C}     ⚡ ZYROX TEMPMAIL CLI — TERMUX EDITION ⚡{X}
+{M}             😈 by ZYROX MODS 😈{X}""")
     email = load_store().get("email")
     if email:
         print(f"📧 Current: {B}{email}{X}")
@@ -412,12 +471,13 @@ def menu():
         print(f"""
 {C}┌─ MENU ─────────────────────────────{X}
 │  {B}1{X} ➕ New Mail (.lat, 24h)
-│  {B}2{X} ✏️  Custom Name
+│  {B}2{X} ✏️  Custom Name + Domain
 │  {B}3{X} 👻 Shadow Mail (.org/.com, 30d)
 │  {B}4{X} 📥 Inbox
 │  {B}5{X} 📖 Read Mail (number)
 │  {B}6{X} 📡 AUTO-RECEIVE (animated, live)
 │  {B}7{X} 📧 My Mails
+│  {B}8{X} 🌐 All Domains
 │  {B}0{X} 🚪 Exit
 {C}└────────────────────────────────────{X}""")
         try:
@@ -429,7 +489,7 @@ def menu():
             do_new()
         elif ch == "2":
             alias = input("✏️ Alias (name only, e.g. rahul123): ").strip()
-            do_custom(alias)
+            do_custom(alias, interactive=True)
         elif ch == "3":
             do_shadow()
         elif ch == "4":
@@ -441,6 +501,8 @@ def menu():
             do_auto()
         elif ch == "7":
             do_mails()
+        elif ch == "8":
+            do_domains()
         elif ch == "0":
             cprint(M, "👋 Bye!")
             break
